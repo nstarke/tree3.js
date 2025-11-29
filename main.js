@@ -23,15 +23,86 @@ function treeKey(tree) {
 }
 
 // ---------------------------
+// IndexedDB cache for treesOfSize
+// ---------------------------
+
+let dbPromise = null;
+
+function openTreeDB() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open("TreeCacheDB", 1);
+
+      request.onupgradeneeded = function () {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("treesOfSize")) {
+          db.createObjectStore("treesOfSize", { keyPath: "key" });
+        }
+      };
+
+      request.onsuccess = function () {
+        resolve(request.result);
+      };
+
+      request.onerror = function () {
+        reject(request.error);
+      };
+    });
+  }
+  return dbPromise;
+}
+
+function loadTreesFromCache(size, n) {
+  return openTreeDB().then((db) => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("treesOfSize", "readonly");
+      const store = tx.objectStore("treesOfSize");
+      const key = `${size}:${n}`;
+      const req = store.get(key);
+
+      req.onsuccess = function () {
+        if (req.result) {
+          resolve(req.result.trees);
+        } else {
+          resolve(null);
+        }
+      };
+
+      req.onerror = function () {
+        reject(req.error);
+      };
+    });
+  });
+}
+
+function saveTreesToCache(size, n, trees) {
+  return openTreeDB().then((db) => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("treesOfSize", "readwrite");
+      const store = tx.objectStore("treesOfSize");
+      const key = `${size}:${n}`;
+      const req = store.put({ key, trees });
+
+      req.onsuccess = function () {
+        resolve();
+      };
+
+      req.onerror = function () {
+        reject(req.error);
+      };
+    });
+  });
+}
+
+// ---------------------------
 // Enumerating all finite labeled trees over {1..n}
 // ---------------------------
 
-const treesOfSizeCache = new Map(); // key: `${size}:${n}` -> Tree[]
-
-function treesOfSize(size, n) {
-  const cacheKey = `${size}:${n}`;
-  if (treesOfSizeCache.has(cacheKey)) {
-    return treesOfSizeCache.get(cacheKey);
+// async version because of IndexedDB caching
+async function treesOfSize(size, n) {
+  const cached = await loadTreesFromCache(size, n);
+  if (cached) {
+    return cached;
   }
 
   let result;
@@ -39,38 +110,43 @@ function treesOfSize(size, n) {
   if (size === 1) {
     result = [];
     for (let label = 1; label <= n; label++) {
-      result.push({ label, children: [] });
+      result.push({ label: label, children: [] });
     }
-    treesOfSizeCache.set(cacheKey, result);
+    await saveTreesToCache(size, n, result);
     return result;
   }
 
-  const seen = new Map(); // map from treeKey -> tree
+  // local deduplication table using plain object instead of Map
+  const seen = {}; // key: treeKey(tree) -> tree
 
   for (let rootLabel = 1; rootLabel <= n; rootLabel++) {
     for (const comp of compositions(size - 1)) {
-      const subtreeLists = comp.map((part) => treesOfSize(part, n)); // each is Tree[]
+      // comp is an array like [part1, part2, ...]
+      const subtreeLists = await Promise.all(
+        comp.map((part) => treesOfSize(part, n))
+      ); // each is an array of trees
+
       const combos = cartesian(subtreeLists); // array of arrays of subtrees
       for (const childrenCombo of combos) {
         const tree = { label: rootLabel, children: childrenCombo };
         const key = treeKey(tree);
-        if (!seen.has(key)) {
-          seen.set(key, tree);
+        if (!Object.prototype.hasOwnProperty.call(seen, key)) {
+          seen[key] = tree;
         }
       }
     }
   }
 
-  result = Array.from(seen.values());
-  treesOfSizeCache.set(cacheKey, result);
+  result = Object.values(seen);
+  await saveTreesToCache(size, n, result);
   return result;
 }
 
-// Infinite generator of all trees
-function* allTrees(n) {
+// Infinite async generator of all trees
+async function* allTrees(n) {
   let size = 1;
   while (true) {
-    const ts = treesOfSize(size, n);
+    const ts = await treesOfSize(size, n);
     for (const t of ts) {
       yield t;
     }
@@ -78,7 +154,7 @@ function* allTrees(n) {
   }
 }
 
-// compositions(total): yields tuples of positive integers summing to total
+// compositions(total): yields arrays of positive integers summing to total
 function* compositions(total) {
   if (total === 0) {
     yield [];
@@ -118,7 +194,8 @@ class WorkerPool {
     this.idleWorkers = [];
     this.queue = [];
     this.nextId = 1;
-    this.callbacks = new Map(); // id -> {resolve, reject}
+    // callbacks: plain object instead of Map
+    this.callbacks = {}; // id -> {resolve, reject}
 
     for (let i = 0; i < size; i++) {
       const worker = new Worker(workerScriptUrl);
@@ -132,10 +209,11 @@ class WorkerPool {
   }
 
   _onWorkerMessage(worker, e) {
-    const { id, result } = e.data;
-    const cb = this.callbacks.get(id);
+    const id = e.data.id;
+    const result = e.data.result;
+    const cb = this.callbacks[id];
     if (cb) {
-      this.callbacks.delete(id);
+      delete this.callbacks[id];
       cb.resolve(result);
     }
     this.idleWorkers.push(worker);
@@ -154,9 +232,9 @@ class WorkerPool {
   submitEmbed(pattern, target) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.callbacks.set(id, { resolve, reject });
+      this.callbacks[id] = { resolve: resolve, reject: reject };
       this.queue.push({
-        msg: { id, pattern, target }
+        msg: { id: id, pattern: pattern, target: target }
       });
       this._dispatch();
     });
@@ -168,7 +246,7 @@ class WorkerPool {
     }
     this.workers = [];
     this.idleWorkers = [];
-    this.callbacks.clear();
+    this.callbacks = {};
     this.queue = [];
   }
 }
@@ -182,12 +260,14 @@ async function isValidExtension(seq, t, pool) {
     return true;
   }
 
-  // submit all embeds(prev, t) in parallel
-  const promises = seq.map((prev) => pool.submitEmbed(prev, t));
+  const promises = [];
+  for (let i = 0; i < seq.length; i++) {
+    promises.push(pool.submitEmbed(seq[i], t));
+  }
 
-  // Wait sequentially for results; workers run in parallel underneath
-  for (const p of promises) {
-    const embedsResult = await p;
+  // Wait in order; workers run in parallel underneath
+  for (let i = 0; i < promises.length; i++) {
+    const embedsResult = await promises[i];
     if (embedsResult) {
       // Some prev embeds into t => invalid extension
       return false;
@@ -210,14 +290,14 @@ async function TREE(n, pool) {
       console.log("New best:", best);
     }
 
-    for (const t of allTrees(n)) {
+    for await (const t of allTrees(n)) {
       const ok = await isValidExtension(seq, t, pool);
       if (ok) {
         seq.push(t);
         await backtrack(seq);
         seq.pop();
       }
-      // NOTE: This loop is infinite for n ≥ 2, just like the Python version.
+      // Like the Python version, this loop is infinite for n ≥ 2.
     }
   }
 
@@ -244,4 +324,3 @@ async function TREE(n, pool) {
     pool.terminate();
   }
 })();
-
