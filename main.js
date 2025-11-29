@@ -195,7 +195,7 @@ async function* allTrees(n) {
 
   // If we've never cached anything for this n, start from size 1.
   // If we *have* cached sizes up to S, resume from S + 1.
-  let size = maxSize > 0 ? maxSize : 1;
+  let size = maxSize > 0 ? maxSize + 1 : 1;
 
   console.log(
     "allTrees starting at size",
