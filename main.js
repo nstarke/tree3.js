@@ -9,9 +9,12 @@ function treeToString(tree) {
   if (!tree.children || tree.children.length === 0) {
     return String(tree.label);
   }
-  return `${tree.label}(` +
+  return (
+    tree.label +
+    "(" +
     tree.children.map(treeToString).join(", ") +
-    `)`;
+    ")"
+  );
 }
 
 // For deduplication in treesOfSize
@@ -19,7 +22,12 @@ function treeKey(tree) {
   if (!tree.children || tree.children.length === 0) {
     return String(tree.label);
   }
-  return `${tree.label}(${tree.children.map(treeKey).join(",")})`;
+  return (
+    tree.label +
+    "(" +
+    tree.children.map(treeKey).join(",") +
+    ")"
+  );
 }
 
 // ---------------------------
@@ -57,7 +65,7 @@ function loadTreesFromCache(size, n) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction("treesOfSize", "readonly");
       const store = tx.objectStore("treesOfSize");
-      const key = `${size}:${n}`;
+      const key = size + ":" + n;
       const req = store.get(key);
 
       req.onsuccess = function () {
@@ -80,11 +88,48 @@ function saveTreesToCache(size, n, trees) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction("treesOfSize", "readwrite");
       const store = tx.objectStore("treesOfSize");
-      const key = `${size}:${n}`;
-      const req = store.put({ key, trees });
+      const key = size + ":" + n;
+      const req = store.put({ key: key, trees: trees });
 
       req.onsuccess = function () {
         resolve();
+      };
+
+      req.onerror = function () {
+        reject(req.error);
+      };
+    });
+  });
+}
+
+// NEW: find the largest size cached for this n
+function getMaxCachedSizeForN(n) {
+  return openTreeDB().then((db) => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("treesOfSize", "readonly");
+      const store = tx.objectStore("treesOfSize");
+      const req = store.openCursor();
+      let maxSize = 0;
+
+      req.onsuccess = function () {
+        const cursor = req.result;
+        if (cursor) {
+          const keyStr = String(cursor.key); // "size:n"
+          const parts = keyStr.split(":");
+          if (parts.length === 2) {
+            const sizePart = parseInt(parts[0], 10);
+            const nPart = parseInt(parts[1], 10);
+            if (!isNaN(sizePart) && !isNaN(nPart) && nPart === n) {
+              if (sizePart > maxSize) {
+                maxSize = sizePart;
+              }
+            }
+          }
+          cursor.continue();
+        } else {
+          // no more entries
+          resolve(maxSize);
+        }
       };
 
       req.onerror = function () {
@@ -127,7 +172,8 @@ async function treesOfSize(size, n) {
       ); // each is an array of trees
 
       const combos = cartesian(subtreeLists); // array of arrays of subtrees
-      for (const childrenCombo of combos) {
+      for (let i = 0; i < combos.length; i++) {
+        const childrenCombo = combos[i];
         const tree = { label: rootLabel, children: childrenCombo };
         const key = treeKey(tree);
         if (!Object.prototype.hasOwnProperty.call(seen, key)) {
@@ -142,13 +188,29 @@ async function treesOfSize(size, n) {
   return result;
 }
 
-// Infinite async generator of all trees
+// Infinite async generator of all trees, resuming from last IndexedDB size
 async function* allTrees(n) {
-  let size = 1;
+  // Find the largest cached size for this n
+  let maxSize = await getMaxCachedSizeForN(n);
+
+  // If we've never cached anything for this n, start from size 1.
+  // If we *have* cached sizes up to S, resume from S + 1.
+  let size = maxSize > 0 ? maxSize + 1 : 1;
+
+  console.log(
+    "allTrees starting at size",
+    size,
+    "for n =",
+    n,
+    "(max cached =",
+    maxSize,
+    ")"
+  );
+
   while (true) {
     const ts = await treesOfSize(size, n);
-    for (const t of ts) {
-      yield t;
+    for (let i = 0; i < ts.length; i++) {
+      yield ts[i];
     }
     size += 1;
   }
@@ -171,10 +233,13 @@ function* compositions(total) {
 function cartesian(lists) {
   if (lists.length === 0) return [[]];
   let acc = [[]];
-  for (const list of lists) {
+  for (let i = 0; i < lists.length; i++) {
+    const list = lists[i];
     const next = [];
-    for (const prefix of acc) {
-      for (const item of list) {
+    for (let j = 0; j < acc.length; j++) {
+      const prefix = acc[j];
+      for (let k = 0; k < list.length; k++) {
+        const item = list[k];
         next.push(prefix.concat([item]));
       }
     }
@@ -241,8 +306,8 @@ class WorkerPool {
   }
 
   terminate() {
-    for (const w of this.workers) {
-      w.terminate();
+    for (let i = 0; i < this.workers.length; i++) {
+      this.workers[i].terminate();
     }
     this.workers = [];
     this.idleWorkers = [];
@@ -297,7 +362,7 @@ async function TREE(n, pool) {
         await backtrack(seq);
         seq.pop();
       }
-      // Like the Python version, this loop is infinite for n ≥ 2.
+      // Like the Python version, this loop is effectively infinite for n ≥ 2.
     }
   }
 
@@ -314,10 +379,14 @@ async function TREE(n, pool) {
   const workerCount = navigator.hardwareConcurrency || 4;
   const pool = new WorkerPool("tree-worker.js", workerCount);
 
-  console.log(`Computing TREE(${n}) (conceptual only, will not terminate for n > 1)...`);
+  console.log(
+    "Computing TREE(" +
+      n +
+      ") (conceptual only, will not terminate for n > 1)..."
+  );
   try {
     const result = await TREE(n, pool);
-    console.log(`TREE(${n}) = ${result}`);
+    console.log("TREE(" + n + ") = " + result);
   } catch (e) {
     console.error("Error during TREE computation:", e);
   } finally {
