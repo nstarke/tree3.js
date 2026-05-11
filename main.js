@@ -161,8 +161,7 @@ async function treesOfSize(size, n) {
     return result;
   }
 
-  // local deduplication table using plain object instead of Map
-  const seen = {}; // key: treeKey(tree) -> tree
+  const seen = new Map(); // key: treeKey(tree) -> tree
 
   for (let rootLabel = 1; rootLabel <= n; rootLabel++) {
     for (const comp of compositions(size - 1)) {
@@ -176,14 +175,14 @@ async function treesOfSize(size, n) {
         const childrenCombo = combos[i];
         const tree = { label: rootLabel, children: childrenCombo };
         const key = treeKey(tree);
-        if (!Object.prototype.hasOwnProperty.call(seen, key)) {
-          seen[key] = tree;
+        if (!seen.has(key)) {
+          seen.set(key, tree);
         }
       }
     }
   }
 
-  result = Object.values(seen);
+  result = [...seen.values()];
   await saveTreesToCache(size, n, result);
   return result;
 }
