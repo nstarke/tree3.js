@@ -375,7 +375,9 @@ async function TREE(n, pool) {
 // ---------------------------
 
 (async function main() {
-  const n = 3; // default like the Python script
+  const params = new URLSearchParams(window.location.search);
+  const nParam = params.get('n');
+  const n = nParam !== null ? Math.max(1, parseInt(nParam, 10)) : 3;
   const workerCount = navigator.hardwareConcurrency || 4;
   const pool = new WorkerPool("tree-worker.js", workerCount);
 
